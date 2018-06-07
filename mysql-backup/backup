@@ -1,0 +1,266 @@
+#!/bin/sh
+#
+# MySQL backup script written by Jeff Rosowski.
+
+# set defaults if not previously set
+backup_delay="${backup_delay:=3600}"
+backup_destdir="${backup_destdir:=/var/backup}"
+backup_sqldays="${backup_sqldays:=7}"
+backup_sqluser="${backup_sqluser:=backupuser}"
+backup_sqlpass="${backup_sqlpass:=password}"
+
+umask u=rw,g=,o=
+
+# check if user wants help
+if [ "$1" = "--help" ] ; then
+  cat <<END
+
+usage: backup [-d]
+
+  -d : runs immediately in debug mode
+
+backup script v3.8.1 (modified version that only does mysql backups)
+
+This script tries to intelligently default the config variables,
+however if needed they can be specified explicitly.
+
+On FreeBSD add the changes to the default config to /etc/rc.conf
+On Linux add the changes to the default config to /etc/conf.d/backup
+
+Format in the config file is: variable_name="value"
+
+The following are the default variables:
+
+ backup_enabled        - determines if backups should run, defaults to YES.
+                         Use NO to disable.
+ backup_delay          - amount of time to randomly wait before starting
+                         backups.
+ backup_destdir        - defaults to /var/backup
+ backup_mysqlcmd       - set to the mysql command, provided it is in the path
+ backup_mysqladmincmd  - set to the mysqladmin command, provided it is in the
+                         path
+ backup_mysqlshowcmd   - set to the mysqlshow command, provided it is in the
+                         path
+ backup_mysqldumpcmd   - set to the mysqldump command, provided it is in the
+                         path
+ backup_sqldays        - number of days to keep gzip archives of mysql
+                         backups, defaulting to 7 days
+ backup_sqluser        - user to run backups as, defaulting to backupuser
+ backup_sqlpass        - password for the backup_sqluser
+ mydatadir             - tries to determine the mysql data directory
+                         automatically
+
+For MySQL backups, SELECT, RELOAD, and LOCK TABLES are required.
+For the default user/password use the following command:
+
+DROP USER 'backupuser'@'localhost';
+GRANT SELECT, RELOAD, LOCK TABLES ON *.* TO 'backupuser'@'localhost'
+  IDENTIFIED BY 'password';
+
+By default the backup script waits a random amount of time before starting to
+avoid killing the backup server with servers running backups simultanionsly.
+
+END
+  exit
+fi
+
+# make sure our path is set correctly
+if [ "`echo $PATH | grep /usr/local/bin`" = "" ] ; then
+  PATH=$PATH:/usr/local/bin
+fi
+if [ "`echo $PATH | grep /usr/local/sbin`" = "" ] ; then
+  PATH=$PATH:/usr/local/sbin
+fi
+
+# check if we're setting debug to run the backup immediately and output to console
+if [ "$1" = "-d" ] ; then
+  debug=TRUE
+fi
+
+# determine OS type
+if [ "`uname`" = "FreeBSD" ] ; then
+  mode="FreeBSD"
+fi
+if [ "`uname`" = "Linux" ] ; then
+  mode="Linux"
+fi
+if [ "$debug" = "TRUE" ] ; then
+  echo "mode: $mode"
+fi
+
+# Load configuration options
+if [ "$mode" = "FreeBSD" ] ; then
+  if [ "$debug" = "TRUE" ] ; then
+    echo reading in FreeBSD config
+  fi
+
+  if [ "`uname -r | grep -e '^4'`" = "" ] ; then
+    # FreeBSD system
+    . /etc/rc.subr
+
+    name="backup"
+    rcvar=$(set_rcvar)
+
+    load_rc_config "${name}"
+  else
+    # FreeBSD 4.x system
+    . /etc/rc.conf
+  fi
+else
+  if [ "$debug" = "TRUE" ] ; then
+    echo reading in Linux config
+  fi
+  # Linux system
+  . /etc/conf.d/backup
+fi
+
+# Set hostname without domain extension
+hostname="`hostname -s`"
+if [ "$hostname" = "" ] ; then
+  hostname=`cat /etc/rc.conf | grep hostname | cut -d\" -f 2 | cut -d\. -f 1`
+fi
+
+# determine if we should run a backup
+if [ "${backup_enabled}" = "NO" ]; then
+  if [ "$mode" = "FreeBSD" ] ; then
+    echo Backup not done.  Backups are disabled in /etc/rc.conf
+  else
+    echo Backup not done.  Backups are disabled in /etc/conf.d/backup
+  fi
+  exit
+fi
+
+# delay to stagger backups
+if [ "$1" = "" ]; then
+  delay=`perl -e 'print int(rand($backup_delay));'`
+  sleep $delay
+fi
+
+
+# start the backup
+if [ "$debug" = "TRUE" ] ; then
+  echo running backup for $hostname
+fi
+
+DATETIME=`date +%Y%m%d%H%M%S`
+
+umask u=rwx,g=,o=
+mkdir -p $backup_destdir/
+umask u=rw,g=,o=
+
+# check if mysql is running, and if so do mysql backup
+if /sbin/pidof mysqld > /dev/null 2> /dev/null
+then
+  if [ "$debug" = "TRUE" ] ; then
+    echo Backing up MySQL
+  fi
+
+  # set executables if not previously set
+  if [ -x `which mysql` ] ; then
+    backup_mysqlcmd="${backup_mysqlcmd:=`which mysql`}"
+  fi
+  if [ -x `which mysqladmin` ] ; then
+    backup_mysqladmincmd="${backup_mysqladmincmd:=`which mysqladmin`}"
+  fi
+  if [ -x `which mysqlshow` ] ; then
+    backup_mysqlshowcmd="${backup_mysqlshowcmd:=`which mysqlshow`}"
+  fi
+  if [ -x `which mysqldump` ] ; then
+    backup_mysqldumpcmd="${backup_mysqldumpcmd:=`which mysqldump`}"
+  fi
+
+  # fetch mysql data dir
+  mydatadir=`${backup_mysqladmincmd} variables --user=$backup_sqluser --password=$backup_sqlpass | grep bdb_home | awk '{ print $4 }' | sed "s/\/[a-z]*\///" | sed "s/\(.*\)/\1\*/"`
+
+  umask u=rwx,g=,o=
+  mkdir -p $backup_destdir/mysql
+  umask u=rw,g=,o=
+
+  if [ "$debug" = "TRUE" ] ; then
+    echo backing up grants
+  fi
+
+  # export grants
+  for name in `$backup_mysqlcmd --user=$backup_sqluser --password=$backup_sqlpass mysql --exec="select User,Host from user" \
+   | grep -v User \
+   | grep -v root \
+   | sed "s/^\(.*\)     \(.*\)$/'\1'@'\2'/"`
+  do
+    echo DROP USER $name\; >> $backup_destdir/mysql/grants-$DATETIME.sql
+    $backup_mysqlcmd --user=$backup_sqluser --password=$backup_sqlpass mysql --exec="show grants for $name \G" \
+     | grep Grants \
+     | sed "s/^.*: GRANT/GRANT/" \
+     | sed "s/$/;/" >> $backup_destdir/mysql/grants-$DATETIME.sql
+    echo >> $backup_destdir/mysql/grants-$DATETIME.sql
+  done
+  gzip $backup_destdir/mysql/grants-$DATETIME.sql
+
+  if [ "$debug" = "TRUE" ] ; then
+    echo dropping binlogs
+  fi
+
+  # drop binlogs
+  $backup_mysqlcmd \
+          --user=$backup_sqluser --password=$backup_sqlpass \
+          --exec='reset master'
+
+  DATETIME=`date +%Y%m%d%H%M%S`
+
+  # backingup mysql databases
+  for dbname in `$backup_mysqlshowcmd --user=$backup_sqluser --password=$backup_sqlpass| grep -e "^|" | grep -v Databases | awk '{ print $2 }'`
+  do
+    if [ "$debug" = "TRUE" ] ; then
+      echo backing up $dbname
+    fi
+    $backup_mysqldumpcmd --add-drop-table \
+           --user=$backup_sqluser --password=$backup_sqlpass \
+           $dbname | gzip > $backup_destdir/mysql/$dbname-$DATETIME.sql.gz
+  done
+
+  # Remove old files
+  sqlsecs=`expr $backup_sqldays \* 86400`
+
+  for file in `ls -1 $backup_destdir/mysql/*`
+  do
+    if [ "$debug" = "TRUE" ] ; then
+      echo checking $file
+    fi
+    if [ $mode = "FreeBSD" ]; then
+      # freebsd date format:
+      timethen=`echo $file | \
+        awk '{ str = substr($1, match($1, "-[0-9]+\." ) + 1, 14)
+               year = substr(str,1,4)
+               month = substr(str,5,2)
+               day = substr(str,7,2)
+               hour = substr(str,9,2)
+               minute = substr(str,11,2)
+               second = substr(str,13,2)
+        printf "%s%s%s%s%s.%s\n", year, month, day, hour, minute, second }'`
+
+      timethen=`date -j $timethen +%s`
+    else
+      # linux date format:
+      timethen=`echo $file | \
+        awk '{ str = substr($1, match($1, "-[0-9]+." ) + 1, 14)
+               year = substr(str,1,4)
+               month = substr(str,5,2)
+               day = substr(str,7,2)
+               hour = substr(str,9,2)
+               minute = substr(str,11,2)
+               second = substr(str,13,2)
+        printf "%s-%s-%s %s:%s:%s\n", year, month, day, hour, minute, second }'`
+
+      timethen=`date --date="$timethen" +%s`
+    fi
+
+    timenow=`date +%s`
+    if [ `expr $timethen + $sqlsecs - $timenow` -lt 0 ] ; then
+      if [ "$debug" = "TRUE" ] ; then
+        echo removing $file
+      fi
+      # removing old files
+      rm -f $file
+    fi
+  done
+fi
+

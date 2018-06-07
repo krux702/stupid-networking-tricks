@@ -1,0 +1,39 @@
+# Note: Example Palo Alto Template
+# Note:
+# Note: This is not a suggested all encompasing config, it's just an example of
+# Note: parsing text.
+#
+# Prompt               Variable             	Default
+# Management Hostname: %FW_MGMT_HOST%		example-fw1
+# Management Domain:   %FW_MGMT_DOMAIN%		example.domain
+# Management IP:       %FW_MGMT_IP%		192.0.2.10
+# Management Mask:     %FW_MGMT_MASK%		255.255.255.0
+# Management Gateway:  %FW_MGMT_GW%		192.0.2.1
+# Management DNS Pri:  %FW_MGMT_DNS_PRI%	192.0.2.20
+# Management DNS Sec:  %FW_MGMT_DNS_SEC%	192.0.2.30
+# Management NTP Pri:  %FW_MGMT_NTP_PRI%	192.0.2.40
+# Management NTP Pri:  %FW_MGMT_NTP_SEC%	192.0.2.50
+#
+
+set deviceconfig system ip-address %FW_MGMT_IP%
+set deviceconfig system netmask %FW_MGMT_MASK%
+set deviceconfig system update-server updates.paloaltonetworks.com
+set deviceconfig system update-schedule threats recurring weekly day-of-week wednesday
+set deviceconfig system update-schedule threats recurring weekly at 01:02
+set deviceconfig system update-schedule threats recurring weekly action download-only
+set deviceconfig system service disable-telnet yes
+set deviceconfig system service disable-http yes
+set deviceconfig system hostname %FW_MGMT_HOST%
+set deviceconfig system default-gateway %FW_MGMT_GW%
+set deviceconfig system dns-setting servers primary %FW_MGMT_DNS_PRI%
+set deviceconfig system dns-setting servers secondary %FW_MGMT_DNS_SEC%
+set deviceconfig system domain %FW_MGMT_DOMAIN%
+set deviceconfig system login-banner "There are many banners like this, but this one is mine."
+set deviceconfig system ntp-servers primary-ntp-server ntp-server-address %FW_MGMT_NTP_PRI%
+set deviceconfig system ntp-servers primary-ntp-server authentication-type none
+set deviceconfig system ntp-servers secondary-ntp-server ntp-server-address %FW_MGMT_NTP_SEC%
+set deviceconfig system ntp-servers secondary-ntp-server authentication-type none
+set deviceconfig system timezone GMT
+set deviceconfig system server-verification yes
+set deviceconfig system permitted-ip 0.0.0.0/0
+

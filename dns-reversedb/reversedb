@@ -1,0 +1,540 @@
+#!/usr/bin/perl -w
+#
+#ident  "@(#)reversedb 20140723.0    2014/07/23"
+#
+# Program: reversedb
+# Version: 20140723.0
+#  Author: Jeff Rosowski
+#
+# Abstract
+# Reads the DNS zone file, and generate reverse DNS zone files on the
+# master server
+#
+# syntax:
+#
+# reversedb [-c config_file] [-s config_file]
+#
+# -c    Generate a master zone configuration file for inclusion in
+#       named.conf
+# -s    Generate a slave zone configuration file for inclusion in
+#       named.conf
+#
+
+use POSIX qw/strftime/;
+use File::Copy;
+use Getopt::Std;
+getopts('c:s:', \%opts);
+
+use Cwd qw(abs_path);
+$config = abs_path($0) . ".conf";
+
+# default configuration settings.  do not edit directly
+# make changes in reversedb.conf
+#
+#############################################################
+
+# set the newfile extension if you want to run in debug to see what would happen.
+$newfile_ext = "";
+
+# default file permissions
+$file_mode = "644";
+$uid = "named";
+$gid = "named";
+
+# directories
+$basedir = "/var/named";
+$ptr_dir = "$basedir";
+$slave_dir = "$basedir";
+
+# named config and master string
+$named_conf = "/etc/named.conf";
+$named_conf_key = "/var/named/example.incl";
+
+# SOA record information
+$server_name = "foo.bar.com.";
+$contact_name = "admin.foo.bar.com.";
+
+# configuration file information
+@dns_servers = ("example-dns.example.com.");
+@transfer_hosts = ("192.168.254.100");
+
+# note: list zones in order of reverse priority
+%zones =  ();
+
+# note: be sure not to have any overlap in subnet ranges
+%ranges = ();
+
+# Use $ORIGIN in reverse zone files
+$use_origin = 0;
+
+# Pointer record format
+# %%ip%%   replaced with IP address of record
+# %%host%% replaced with hostname of record
+$pointer_format = "%%ip%%\t\tIN\tPTR\t%%host%%";
+
+# Set default timers
+$timer_ttl = "3h";
+$timer_refresh = "3h";
+$timer_retry = "1h";
+$timer_expire = "1w";
+$timer_negative_caching = "1h";
+
+# Revision control
+# %%filename%% replaced with changed filename
+# %%basedir%% replaced with base directory
+# %%notice%% replaced with change notice
+# %%author%% replaced with author
+# $rcs_command = "git add %%filename%% ; git commit -m \"%%notice%%\" %%filename%%";
+$pre_rcs_command = "";
+$rcs_command = "";
+$post_rcs_command = "";
+
+# Enforce use of tabs
+$enforce_tabs = 1;
+
+# Enforce leading and trailing whitespace
+$enforce_whitespace = 0;
+
+# read in configuration file
+require "$config";
+
+#############################################################
+
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+
+my $USER = $ENV{LOGNAME} || $ENV{USER} || getpwuid($<);
+
+$dat = strftime('%Y%m%d',localtime);
+
+$ver = "00";
+$now = "$dat$ver";
+
+%address = ();
+
+# check that we're running on the master
+$data = "";
+$found_key = 0;
+open(FILE, "<$named_conf") or die ( print "error opening $named_conf\n" );
+while(<FILE>)
+{
+  if( $_ =~ /$named_conf_key/ )
+  {
+    $found_key = 1;
+  }
+}
+close(FILE);
+
+# read in each of the zone files
+$warning = 0;
+foreach $domain ( keys %zones )
+{
+  $zonefile = $zones{$domain};
+
+  open(FILE, "<$zonefile") or die ( print "error opening $zonefile\n" );
+  while(<FILE>)
+  {
+    $data = lc $_;
+    $data =~ s/^\s+//;
+    $data =~ /()/;
+
+    # keep track of ORIGIN
+    if( $data =~ /^\$origin\ ([^\s]+)/ )
+    {
+      $domain = ".$1";
+    }
+
+    # match DNS forward record
+    if( $data =~ /^([a-z][^\s]+)\s+(a|in\s+a)\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/ )
+    {
+      $host = $1;
+      if(index($host, $domain) == -1)
+      {
+        $host = "$host$domain";
+      }
+   
+      $ip = $3;
+      if( $ip =~ /([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)/ )
+      {
+        $octa = $1;
+        $octb = $2;
+        $octc = $3;
+        $octd = $4;
+        $ser = $octa * 16777216 + $octb * 65536 + $octc * 256;
+
+        if(&check_range($ser+$octd,$data))
+        {
+          if($address{$ser}{$octd})
+          {
+            print "Warning: Duplicate A records for $ip, $address{$ser}{$octd} & $host\n";
+            $warning = 1;
+          }
+          $address{$ser}{$octd} = $host;
+        }
+      }
+    }
+  }
+  close(FILE);
+}
+if($warning)
+{
+  print "\nWill use later hostname for all duplicate A records.\n"
+    . "Use CNAME records to indicate alternate hostnames, and ensure the correct choice of PTR record.\n\n";
+}
+
+# build named.conf include file
+if($opts{c})
+{
+  open(MASTER_CONF, ">$opts{c}");
+}
+
+if($opts{s})
+{
+  open(SLAVE_CONF, ">$opts{s}");
+}
+
+# create zone file headers for each /24 subnet within the defined ranges
+foreach $block ( sort { ip2serial($ranges{$a}) <=> ip2serial($ranges{$b}) } keys %ranges )
+{
+  $addr_block = $ranges{$block};
+  ($mask,$ser) = ip2serial($addr_block);
+
+  for($i = $ser ; &check_addr($ser,$i,$mask) ; $i = $i + 256)
+  {
+    ($octa,$octb,$octc,$octd) = &serial2ip($i);
+
+    $filename = "$ptr_dir/db.$octa.$octb.$octc";
+
+    # read in old serial number
+    $old_serial = 0;
+    if(-e $filename)
+    {
+      open(FILE, "<$filename");
+      while(<FILE>)
+      {
+        if( $old_serial == 0 and $_ =~ /^\s+([0-9]+)/ )
+        {
+          $old_serial = $1;
+        }
+      }
+      close(FILE);
+    }
+
+    if($old_serial >= $now)
+    {
+      $now = $old_serial + 1;
+    }
+
+    # write out new header
+    open(FILE, ">$filename.new");
+    print FILE "; zone file for $octc.$octb.$octa.in-addr.arpa.\n";
+    print FILE "\$TTL  $timer_ttl\n";
+    print FILE "$octc.$octb.$octa.in-addr.arpa.\t\tIN\tSOA\t$server_name $contact_name (\n";
+    print FILE "\t\t\t\t\t\t\t$now\t; Serial\n";
+    print FILE "\t\t\t\t\t\t\t$timer_refresh\t\t; Refresh after 3 hours\n";
+    print FILE "\t\t\t\t\t\t\t$timer_retry\t\t; Retry after 1 hour\n";
+    print FILE "\t\t\t\t\t\t\t$timer_expire\t\t; Expire after 1 week\n";
+    print FILE "\t\t\t\t\t\t\t$timer_negative_caching )\t\t; Negative caching TTL of 1 day\n";
+    print FILE ";\n";
+    print FILE "; name servers\n";
+    foreach(@dns_servers)
+    {
+      print FILE "$octc.$octb.$octa.in-addr.arpa.\t\tIN\tNS\t$_\n";
+    }
+    close(FILE);
+
+    # build named.conf include file
+    if($opts{c})
+    {
+      print MASTER_CONF "zone \"$octc.$octb.$octa.in-addr.arpa\" in {\n";
+      print MASTER_CONF "\ttype master;\n";
+      print MASTER_CONF "\tfile \"$filename\";\n";
+
+      if(defined(@transfer_hosts))
+      {
+        print MASTER_CONF "\tallow-transfer { ";
+        foreach(@transfer_hosts)
+        {
+          print MASTER_CONF "$_; ";
+        }
+        print MASTER_CONF "};\n";
+      }
+      print MASTER_CONF "};\n\n";
+    }
+
+    if($opts{s})
+    {
+      print SLAVE_CONF "zone \"$octc.$octb.$octa.in-addr.arpa\" in {\n";
+      print SLAVE_CONF "\ttype slave;\n";
+      print SLAVE_CONF "\tfile \"$slave_dir/db.$octa.$octb.$octc\";\n";
+
+      if(defined(@master_hosts))
+      {
+        print SLAVE_CONF "\tmasters { ";
+        foreach(@master_hosts)
+        {
+          print SLAVE_CONF "$_; ";
+        }
+        print SLAVE_CONF "};\n";
+      }
+      print SLAVE_CONF "};\n\n";
+    }
+  }
+}
+
+if($opts{c})
+{
+  close(MASTER_CONF);
+}
+
+if($opts{s})
+{
+  close(SLAVE_CONF);
+}
+
+# write out records to zone files
+for( 0..255 ) { $rank{$_} = $_ }
+foreach $subnet ( sort { $address{$b} <=> $address{$a} } keys %address )
+{
+  ($octa,$octb,$octc,$octd) = &serial2ip($subnet);
+
+  $filename = "$ptr_dir/db.$octa.$octb.$octc.new";
+
+  # append to zone file
+  open(FILE, ">>$filename");
+
+  print FILE ";\n";
+  print FILE "; pointer records\n";
+
+  if($use_origin)
+  {
+    print FILE "\$ORIGIN $octc.$octb.$octa.in-addr.arpa.\n";
+  }
+
+  for $octd ( sort { $rank{$a} <=> $rank{$b} }  keys %{ $address{$subnet} } )
+  {
+    if($use_origin)
+    {
+      $ip = "$octd";
+    }
+    else
+    {
+      $ip = "$octd.$octc.$octb.$octa.in-addr.arpa.";
+    }
+
+    # build PTR record based on template
+    $ptr_record = $pointer_format;
+    $ptr_record =~ s/%%ip%%/$ip/g;
+    $ptr_record =~ s/%%host%%/$address{$subnet}{$octd}/g;
+
+    print FILE "$ptr_record\n";
+  }
+
+  close(FILE);
+}
+
+# pre update the revision control system
+if($pre_rcs_command)
+{
+  $commit = $pre_rcs_command;
+  $commit =~ s/%%filename%%/$filename$newfile_ext/g;
+  $commit =~ s/%%basedir%%/$basedir/g;
+  $commit =~ s/%%notice%%/$USER ran reversedb/g;
+  $commit =~ s/%%author%%/$USER/g;
+  system("$commit");
+}        
+
+# check for diffs
+foreach $block ( keys %ranges )
+{
+  $addr_block = $ranges{$block};
+  ($mask,$ser) = ip2serial($addr_block);
+
+  for($i = $ser ; &check_addr($ser,$i,$mask) ; $i = $i + 256)
+  {
+    ($octa,$octb,$octc,$octd) = &serial2ip($i);
+
+    $filename = "$ptr_dir/db.$octa.$octb.$octc";
+
+    $old_buffer = "";
+    # read in old file
+    if(-e $filename)
+    {
+      open(FILE, "<$filename");
+      while(<FILE>)
+      {
+        if( $_ =~ /(PTR|NS)/ )
+        {
+          $old_buffer .= $_;
+        }
+      }
+      close(FILE);
+    }
+
+    $new_buffer = "";
+    # read in new file
+    if(-e "$filename.new")
+    {
+      open(FILE, "<$filename.new");
+      while(<FILE>)
+      {
+        if( $_ =~ /(PTR|NS)/ )
+        {
+          $new_buffer .= $_;
+        }
+      }
+      close(FILE);
+
+      if(!$enforce_tabs)
+      {
+        #ignore all inline whitespace
+        $old_buffer =~ s/\s+/ /g;
+        $new_buffer =~ s/\s+/ /g;
+      }
+
+      if(!$enforce_whitespace)
+      {
+        #ignore leading/trailing whitespace
+        $old_buffer =~ s/^\s*//;
+        $old_buffer =~ s/\s*$//;
+        $new_buffer =~ s/^\s*//;
+        $new_buffer =~ s/\s*$//;
+      }
+
+      # compare the old file to new and copy changes
+      if($old_buffer ne $new_buffer)
+      {
+        print "zone file $filename for $octc.$octb.$octa.in-addr.arpa. changed\n";
+
+        # replace the old file with the new one.
+        copy("$filename.new","$filename$newfile_ext");
+
+        # update file in revision control system
+        if($rcs_command)
+        {
+          $commit = $rcs_command;
+          $commit =~ s/%%filename%%/$filename$newfile_ext/g;
+          $commit =~ s/%%basedir%%/$basedir/g;
+          $commit =~ s/%%notice%%/$USER ran reversedb/g;
+          $commit =~ s/%%author%%/$USER/g;
+          system("$commit");
+        }        
+
+        if($uid)
+        {
+          system("sudo chown $uid $filename$newfile_ext");
+        }
+        if($gid)
+        {
+          system("sudo chgrp $gid $filename$newfile_ext");
+        }
+        if($file_mode)
+        {
+          system("sudo chmod $file_mode $filename$newfile_ext");
+        }
+
+        # remove the working copy.
+        system("rm -f $filename.new");
+      }
+      else
+      {
+        # remove the working copy.
+        system("rm -f $filename.new");
+      }
+    }
+  }
+}
+
+# post update the revision control system
+if($post_rcs_command)
+{
+  $commit = $post_rcs_command;
+  $commit =~ s/%%filename%%/$filename$newfile_ext/g;
+  $commit =~ s/%%basedir%%/$basedir/g;
+  $commit =~ s/%%notice%%/$USER ran reversedb/g;
+  $commit =~ s/%%author%%/$USER/g;
+  system("$commit");
+}        
+
+sub check_range
+{
+  # return true if ip is within any of the defined subnets
+  my ($addr,$ip) = @_;
+
+  my $mask = 0;
+  my $ser = 0;
+  my $good_addr = 0;
+
+  foreach $block ( keys %ranges )
+  {
+    $addr_block = $ranges{$block};
+    ($mask,$ser) = ip2serial($addr_block);
+
+    if(&check_addr($ser,$addr,$mask))
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+sub check_addr
+{
+  # returns true if both addresses are within the same subnet
+  my ($addra,$addrb,$mask) = @_;
+
+  my $m = 4294967296 >> $mask;
+
+  # this is a stupid bug, but under solaris, but only when running in a script,
+  # the bitshift to figure out the inverse mask fails.
+  #
+  #  4294967296 >> 24 normaly should equal 255
+  #
+  # However, the result we were getting was 256.
+  # Since the result should always be odd unless zero, add modulous 2 subtracted by 1
+
+  $m = $m + ($m % 2 - 1);
+
+  if(($m | $addra) == ($m | $addrb))
+  {
+    return 1;
+  }
+  else
+  {
+    return 0;
+  }
+}
+
+sub ip2serial
+{
+  # convert ip address to ip serial number
+  my ($address) = @_;
+
+  my $mask = 32;
+  my $ser = 0;
+
+  if( $address =~ /^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)\/([0-9]+)/ )
+  {
+    $mask = $5;
+    $ser = $1 * 16777216 + $2 * 65536 + $3 * 256 + $4;
+  }
+  elsif( $address =~ /^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)/ )
+  {
+    $ser = $1 * 16777216 + $2 * 65536 + $3 * 256 + $4;
+  }
+  return ($mask,$ser);
+}
+
+sub serial2ip
+{
+  # convert ip serial number to ip address
+  my ($address) = @_;
+
+  my $octa = int($address / 16777216);
+  my $octb = $address - ($octa * 16777216);
+  $octb = int($octb / 65536);
+  my $octc = $address - ($octa * 16777216) - ($octb * 65536);
+  $octc = int($octc / 256);
+  my $octd = $address - ($octa * 16777216) - ($octb * 65536) - ($octc * 256);
+
+  return ($octa, $octb, $octc, $octd);
+}

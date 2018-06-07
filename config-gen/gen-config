@@ -1,0 +1,85 @@
+#!/usr/bin/perl
+
+# Generates a config based on a template
+
+# Template file
+($template_name) = @ARGV;
+
+if(!$template_name)
+{
+  print "Generates a config based on a template
+
+SYNTAX:
+
+./gen-config <template_name>
+
+";
+
+  exit;
+}
+
+
+# Prompt               Variable             Default
+# Management IP:       %FW_MGMT_IP%         10.89.201.40
+
+%prompts = ();
+%vars = ();
+
+# first pass read of file to collect variable definitions
+open(INFILE,"<$template_name") or die ("Unable to open $template_name\n");
+while(<INFILE>)
+{
+  $data = $_;
+
+  if( $data =~ m/^# Note:(.*)$/ )
+  {
+    $note = $1;
+    $note =~ s/^\s+//;
+    $note =~ s/\s+$//;
+    print "$note\n";
+  }
+  if( $data =~ m/^#(\s+|)([^%]+)(%[^%]+%)\s+(.*)$/ )
+  {
+    if($note)
+    {
+      print "\n_________________________________________________\n\n";
+      print "Please enter value for configuration variables.\nPress [ENTER] to accept default value.\n\n";
+      $note = "";
+    }
+    $var_name = $3;
+    $prompts{$3} = $2;
+    $vars{$3} = $4;
+
+    print "$prompts{$var_name} [$vars{$var_name}]: ";
+    $input = <STDIN>;
+    chomp $input;
+    if($input)
+    {
+      $vars{$var_name} = $input;
+    }
+  }
+}
+close(INFILE);
+
+
+print "\n###\n\n";
+
+# second pass read of file, modify based on variable definitions, and output
+open(INFILE,"<$template_name") or die ("Unable to open $template_name\n");
+while(<INFILE>)
+{
+  $data = $_;
+  if($data =~ /^#/)
+  {
+    # comment, do nothing
+  }
+  else
+  {
+    for $var_name (keys %vars)
+    {
+      $data =~ s/$var_name/$vars{$var_name}/g;
+    }
+    print $data;
+  }
+}
+close(INFILE);
