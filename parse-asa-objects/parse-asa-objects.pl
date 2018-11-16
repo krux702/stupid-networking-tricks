@@ -6,6 +6,7 @@ use Getopt::Long;
 
 $debug = "";
 GetOptions ("debug"  => \$debug,
+            "color"  => \$color,
             "expand" => \$expand_acls);
 
 # item{name} = (  parents => [...],
@@ -27,6 +28,7 @@ SYNTAX:
 OPTIONS:
 
 --expand   Expand out ACLs
+--color    Highlight in color
 
 ";
 
@@ -52,24 +54,75 @@ open (FILE, "<$filename");
 
 while(<FILE>)
 {
-  if($_ =~ /^object (network|service) ([a-zA-Z0-9\._-]*)/)
+  if($_ =~ /^object (network|service) ([^\s]+)/)
   {
     $current_object = "OBJECT: $2";
+    $current_protocol = "";
     $asa_objects{$current_object}{'parents'} = [];
     $asa_objects{$current_object}{'children'} = [];
   }
 
-  if($_ =~ /^object-group (network|service) ([a-zA-Z0-9\._-]*)/)
+  if($_ =~ /^object-group network ([^\s]+)/)
   {
-    $current_object = "OBJECT-GROUP: $2";
+    $current_object = "OBJECT-GROUP: $1";
+    $current_protocol = "";
     $asa_objects{$current_object}{'parents'} = [];
     $asa_objects{$current_object}{'children'} = [];
   }
+  elsif($_ =~ /^object-group service ([^\s]+) ([^\s]+)/)
+  {
+    $current_object = "OBJECT-GROUP: $1";
+    $current_protocol = $2;
+    $asa_objects{$current_object}{'parents'} = [];
+    $asa_objects{$current_object}{'children'} = [];
+  }
+  elsif($_ =~ /^object-group service ([^\s]+)/)
+  {
+    $current_object = "OBJECT-GROUP: $1";
+    $current_protocol = "";
+    $asa_objects{$current_object}{'parents'} = [];
+    $asa_objects{$current_object}{'children'} = [];
+  }
+  elsif($_ =~ /^object-group protocol ([^\s]+)/)
+  {
+    $current_object = "OBJECT-GROUP: $1";
+    $asa_objects{$current_object}{'parents'} = [];
+    $asa_objects{$current_object}{'children'} = [];
+  }
+
+  elsif($_ =~ /^object-group icmp-type ([^\s]+)/)
+  {
+    $current_object = "OBJECT-GROUP: $1";
+    $asa_objects{$current_object}{'parents'} = [];
+    $asa_objects{$current_object}{'children'} = [];
+  }
+
   if($_ =~ /^ group-object (.*)$/)
   {
-     push_uniq("OBJECT-GROUP: $1", 'parents', $current_object);
-     push @{ $asa_objects{$current_object}{'children'}}, "OBJECT-GROUP: $1";
+    push_uniq("OBJECT-GROUP: $1", 'parents', $current_object);
+    push @{ $asa_objects{$current_object}{'children'}}, "OBJECT-GROUP: $1";
   }
+  if($_ =~ /^ port-object (.*)$/)
+  {
+    if($current_protocol)
+    {
+      push @{ $asa_objects{$current_object}{'items'}}, "$current_protocol $1";
+    }
+    else
+    {
+      push @{ $asa_objects{$current_object}{'items'}}, "$1";
+    }
+  }
+
+  if($_ =~ /^ protocol-object (.*)$/)
+  {
+    push @{ $asa_objects{$current_object}{'items'}}, "$1";
+  }
+  if($_ =~ /^ icmp-object (.*)$/)
+  {
+    push @{ $asa_objects{$current_object}{'items'}}, "$1";
+  }
+
   if($_ =~ /^ network-object object (.*)$/)
   {
      push_uniq("OBJECT: $1", 'parents', $current_object);
@@ -87,8 +140,8 @@ while(<FILE>)
 
   if($_ =~ /^ service-object object (.*)$/)
   {
-     push_uniq("OBJECT: $1", 'parents', $current_object);
-     push @{ $asa_objects{$current_object}{'children'}}, "OBJECT: $1";
+    push_uniq("OBJECT: $1", 'parents', $current_object);
+    push @{ $asa_objects{$current_object}{'children'}}, "OBJECT: $1";
   }
   elsif($_ =~ /^ service-object (.*)$/)
   {
@@ -99,7 +152,6 @@ while(<FILE>)
   {
     push @{ $asa_objects{$current_object}{'items'}}, "fqdn v4 $1";
   }
-
 
   if($_ =~ /^access-list (.*) (standard|extended) (.*)/ )
   {
@@ -177,27 +229,59 @@ while(<FILE>)
 
 close(FILE);
 
-print RED,BOLD,"\n---------------\n";
-print "Dump of objects\n";
-print "---------------\n",RESET;
+if($color)
+{
+  print RED,BOLD,"\n---------------\n";
+  print "Dump of objects\n";
+  print "---------------\n",RESET;
+}
+else
+{
+  print "\n---------------\n";
+  print "Dump of objects\n";
+  print "---------------\n";
+}
 
 print Data::Dumper->Dump( [ \%asa_objects ], [ qw(*asa_objects) ] );
 
 
 if($expand_acls)
 {
-  print RED,BOLD,"\n-------------\n";
-  print "Expanded ACLs\n";
-  print "-------------\n",RESET;
+  if($color)
+  {
+    print RED,BOLD,"\n-------------\n";
+    print "Expanded ACLs\n";
+    print "-------------\n",RESET;
+  }
+  else
+  {
+    print "\n-------------\n";
+    print "Expanded ACLs\n";
+    print "-------------\n";
+  }
 
   foreach $key (sort keys %asa_objects)
   {
     if($key =~ /^ACL: /)
     {
-      print BOLD, BLUE, "$key\n", RESET;
+      if($color)
+      {
+        print BOLD, BLUE, "$key\n", RESET;
+      }
+      else
+      {
+        print "$key\n";
+      }
       foreach $acl (@{$asa_objects{$key}{'items'}})
       {
-        print BOLD, WHITE, "$acl\n", RESET;
+        if($color)
+        {
+          print BOLD, WHITE, "$acl\n", RESET;
+        }
+        else
+        {
+          print "$acl\n";
+        }
         expand_acl($acl);
 
       }
@@ -207,9 +291,18 @@ if($expand_acls)
 }
 
 
-print RED,BOLD,"\n--------------------\n";
-print "Unreferenced objects\n";
-print "--------------------\n",RESET;
+if($color)
+{
+  print RED,BOLD,"\n--------------------\n";
+  print "Unreferenced objects\n";
+  print "--------------------\n",RESET;
+}
+else
+{
+  print "\n--------------------\n";
+  print "Unreferenced objects\n";
+  print "--------------------\n";
+}
 
 foreach $key (sort keys %asa_objects)
 {
