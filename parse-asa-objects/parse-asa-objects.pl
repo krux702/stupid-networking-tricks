@@ -184,6 +184,15 @@ while(<FILE>)
     push @{ $asa_objects{$access_group}{'children'} }, $acl;
     push @{ $asa_objects{"ACCESS_GROUPS"}{'children'} }, $access_group;
   }
+  if($_ =~ /^access-group ([^\s]+) global/)
+  {
+    $acl = "ACL: $1";
+    $access_group = "ACCESS-GROUP: global";
+    push_uniq($acl, 'parents', $access_group);
+    $asa_objects{$access_group}{'parents'} = ["ACCESS_GROUPS"];
+    push @{ $asa_objects{$access_group}{'children'} }, $acl;
+    push @{ $asa_objects{"ACCESS_GROUPS"}{'children'} }, $access_group;
+  }
 
   # crypto map <map_name> <number> match address <acl>
 
