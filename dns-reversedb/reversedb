@@ -1,9 +1,9 @@
 #!/usr/bin/perl -w
 #
-#ident  "@(#)reversedb 20140723.0    2014/07/23"
+#ident  "@(#)reversedb 20190222.0    2019/02/22"
 #
 # Program: reversedb
-# Version: 20140723.0
+# Version: 20190222.0
 #  Author: Jeff Rosowski
 #
 # Abstract
@@ -249,7 +249,7 @@ foreach $block ( sort { ip2serial($ranges{$a}) <=> ip2serial($ranges{$b}) } keys
       print MASTER_CONF "\ttype master;\n";
       print MASTER_CONF "\tfile \"$filename\";\n";
 
-      if(defined(@transfer_hosts))
+      if(@transfer_hosts)
       {
         print MASTER_CONF "\tallow-transfer { ";
         foreach(@transfer_hosts)
@@ -267,7 +267,7 @@ foreach $block ( sort { ip2serial($ranges{$a}) <=> ip2serial($ranges{$b}) } keys
       print SLAVE_CONF "\ttype slave;\n";
       print SLAVE_CONF "\tfile \"$slave_dir/db.$octa.$octb.$octc\";\n";
 
-      if(defined(@master_hosts))
+      if(@master_hosts)
       {
         print SLAVE_CONF "\tmasters { ";
         foreach(@master_hosts)

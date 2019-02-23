@@ -222,7 +222,7 @@ foreach $device_file (@ARGV)
         $description =~ s/[[:punct:]\s]+$//;
         $description =~ s/^[[:punct:]\s]+//;
         # backtick quotes
-        $description =~ s/\"/\\\"/;
+        $description =~ s/\"/\\\"/g;
         
         $description = "\"$description\"";
       }
