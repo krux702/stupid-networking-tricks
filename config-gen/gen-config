@@ -3,15 +3,15 @@
 # Generates a config based on a template
 
 # Template file
-($template_name) = @ARGV;
+($variable_file, $template_file) = @ARGV;
 
-if(!$template_name)
+if(!$variable_file || !$template_file)
 {
   print "Generates a config based on a template
 
 SYNTAX:
 
-./gen-config <template_name>
+./gen-config <variable_file> <template_file>
 
 ";
 
@@ -25,8 +25,8 @@ SYNTAX:
 %prompts = ();
 %vars = ();
 
-# first pass read of file to collect variable definitions
-open(INFILE,"<$template_name") or die ("Unable to open $template_name\n");
+# first pass read variables file to collect variable definitions
+open(INFILE,"<$variable_file") or die ("Unable to open $variable_file\n");
 while(<INFILE>)
 {
   $data = $_;
@@ -64,8 +64,8 @@ close(INFILE);
 
 print "\n###\n\n";
 
-# second pass read of file, modify based on variable definitions, and output
-open(INFILE,"<$template_name") or die ("Unable to open $template_name\n");
+# second pass read template file, modify based on variable definitions, and output
+open(INFILE,"<$template_file") or die ("Unable to open $template_file\n");
 while(<INFILE>)
 {
   $data = $_;
