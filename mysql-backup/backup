@@ -19,13 +19,13 @@ usage: backup [-d]
 
   -d : runs immediately in debug mode
 
-backup script v3.8.1 (modified version that only does mysql backups)
+backup script v3.8.2 (modified version that only does mysql backups)
 
 This script tries to intelligently default the config variables,
 however if needed they can be specified explicitly.
 
 On FreeBSD add the changes to the default config to /etc/rc.conf
-On Linux add the changes to the default config to /etc/conf.d/backup
+On Linux add the changes to the default config to /etc/mysql-backup.conf
 
 Format in the config file is: variable_name="value"
 
@@ -111,7 +111,7 @@ else
     echo reading in Linux config
   fi
   # Linux system
-  . /etc/conf.d/backup
+  . /etc/mysql-backup.conf
 fi
 
 # Set hostname without domain extension
@@ -125,7 +125,7 @@ if [ "${backup_enabled}" = "NO" ]; then
   if [ "$mode" = "FreeBSD" ] ; then
     echo Backup not done.  Backups are disabled in /etc/rc.conf
   else
-    echo Backup not done.  Backups are disabled in /etc/conf.d/backup
+    echo Backup not done.  Backups are disabled in /etc/mysql-backup.conf
   fi
   exit
 fi
@@ -149,7 +149,7 @@ mkdir -p $backup_destdir/
 umask u=rw,g=,o=
 
 # check if mysql is running, and if so do mysql backup
-if /sbin/pidof mysqld > /dev/null 2> /dev/null
+if pidof mysqld > /dev/null 2> /dev/null
 then
   if [ "$debug" = "TRUE" ] ; then
     echo Backing up MySQL
@@ -181,13 +181,11 @@ then
   fi
 
   # export grants
-  for name in `$backup_mysqlcmd --user=$backup_sqluser --password=$backup_sqlpass mysql --exec="select User,Host from user" \
-   | grep -v User \
-   | grep -v root \
-   | sed "s/^\(.*\)     \(.*\)$/'\1'@'\2'/"`
+  for name in `$backup_mysqlcmd --user=$backup_sqluser --password=$backup_sqlpass mysql --execute="select CONCAT(User, '@', Host) from user" \
+   | grep localhost`
   do
     echo DROP USER $name\; >> $backup_destdir/mysql/grants-$DATETIME.sql
-    $backup_mysqlcmd --user=$backup_sqluser --password=$backup_sqlpass mysql --exec="show grants for $name \G" \
+    $backup_mysqlcmd --user=$backup_sqluser --password=$backup_sqlpass mysql --execute="show grants for $name \G" \
      | grep Grants \
      | sed "s/^.*: GRANT/GRANT/" \
      | sed "s/$/;/" >> $backup_destdir/mysql/grants-$DATETIME.sql
@@ -200,19 +198,19 @@ then
   fi
 
   # drop binlogs
-  $backup_mysqlcmd \
-          --user=$backup_sqluser --password=$backup_sqlpass \
-          --exec='reset master'
+  #$backup_mysqlcmd \
+  #        --user=$backup_sqluser --password=$backup_sqlpass \
+  #        --execute='reset master'
 
   DATETIME=`date +%Y%m%d%H%M%S`
 
   # backingup mysql databases
-  for dbname in `$backup_mysqlshowcmd --user=$backup_sqluser --password=$backup_sqlpass| grep -e "^|" | grep -v Databases | awk '{ print $2 }'`
+  for dbname in `$backup_mysqlshowcmd --user=$backup_sqluser --password=$backup_sqlpass| grep -e "^|" | grep -v -E "schema|Databases" | awk '{ print $2 }'`
   do
     if [ "$debug" = "TRUE" ] ; then
       echo backing up $dbname
     fi
-    $backup_mysqldumpcmd --add-drop-table \
+    $backup_mysqldumpcmd --single-transaction --add-drop-table \
            --user=$backup_sqluser --password=$backup_sqlpass \
            $dbname | gzip > $backup_destdir/mysql/$dbname-$DATETIME.sql.gz
   done
