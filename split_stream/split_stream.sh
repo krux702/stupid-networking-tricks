@@ -2,7 +2,7 @@
 
 if [ "$1" == "" ] ; then
   cat <<END
-Split stream - splits a packet capture into it's individual TCP and UDP streams for analysis.
+split stream - splits a packet capture into its individual TCP and UDP streams for analysis.
 
 syntax: ./split_stream.sh <pcap_file> [output_dir]
 
